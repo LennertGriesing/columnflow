@@ -583,7 +583,8 @@ def normalization_weights_setup(
                     f"no cross section registered for process {process_inst} for center-of-mass energy of "
                     f"{self.config_inst.campaign.ecm}",
                 )
-            xsec = process_inst.get_xsec(self.config_inst.campaign.ecm).nominal
+            shift = task.global_shift_inst
+            xsec = process_inst.aux.get(shift, process_inst.xsecs)[self.config_inst.campaign.ecm].nominal
             sum_weights = merged_selection_stats_sum_weights["sum_mc_weight_per_process"][str(process_inst.id)]
             fill_weight_table(process_inst, xsec, sum_weights)
 
