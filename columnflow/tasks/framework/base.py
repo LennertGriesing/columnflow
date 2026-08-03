@@ -447,7 +447,7 @@ class AnalysisTask(BaseTask, law.SandboxTask):
         object_cls: od.UniqueObjectMeta,
         groups_str: str | None = None,
         accept_patterns: bool = True,
-        deep: bool = False,
+        deep: bool | None = None,
         strict: bool = False,
         multi_strategy: str = "first",
     ) -> list[str] | dict[od.UniqueObject, list[str]]:
@@ -501,9 +501,11 @@ class AnalysisTask(BaseTask, law.SandboxTask):
             if multi_strategy == "first":
                 return all_object_names[container[0]]
             if multi_strategy == "union":
-                return list(set.union(*map(set, all_object_names.values())))
+                return law.util.make_unique(law.util.flatten(all_object_names.values()))
             if multi_strategy == "intersection":
-                return list(set.intersection(*map(set, all_object_names.values())))
+                all_names = law.util.make_unique(law.util.flatten(all_object_names.values()))
+                intersection = set.intersection(*map(set, all_object_names.values()))
+                return sorted(intersection, key=all_names.index)
             # "same", so check that values are identical
             first = all_object_names[container[0]]
             if not all(all_object_names[c] == first for c in container[1:]):
@@ -514,6 +516,8 @@ class AnalysisTask(BaseTask, law.SandboxTask):
             return first
 
         # prepare value caching
+        has_deep_lookup = object_cls in container._deep_child_classes
+        deep = True if deep is None and has_deep_lookup else deep
         singular = object_cls.cls_name_singular
         plural = object_cls.cls_name_plural
         _cache: dict[str, set[str]] = {}
@@ -529,8 +533,8 @@ class AnalysisTask(BaseTask, law.SandboxTask):
         def has_obj(name: str) -> bool:
             if "has_obj_func" not in _cache:
                 kwargs = {}
-                if object_cls in container._deep_child_classes:
-                    kwargs["deep"] = deep
+                if has_deep_lookup:
+                    kwargs["deep"] = bool(deep)
                 _cache["has_obj_func"] = functools.partial(getattr(container, f"has_{singular}"), **kwargs)
             return _cache["has_obj_func"](name)
 
@@ -674,7 +678,7 @@ class AnalysisTask(BaseTask, law.SandboxTask):
                     _param = _container.x(default_str, None)
                     # allow default to be a function, taking task parameters as input
                     if isinstance(_param, Callable):
-                        _param = _param(cls, _container, task_params)
+                        _param = _param(task_cls=cls, container=_container, task_params=task_params)
                     # handle empty values and return type
                     if not return_single_value:
                         _param = () if _param is None else law.util.make_tuple(_param)
@@ -1174,6 +1178,7 @@ class ConfigTask(AnalysisTask):
     exclude_params_remote_workflow = {"known_shifts"}
     exclude_params_index = {"known_shifts"}
     exclude_params_repr = {"known_shifts"}
+    exclude_params_hash = {"known_shifts"}
 
     # the field in the store parts behind which the new part is inserted
     # added here for subclasses that typically refer to the store part added by _this_ class
@@ -1409,7 +1414,7 @@ class ConfigTask(AnalysisTask):
     @classmethod
     def _multi_sequence_repr(
         cls,
-        values: Sequence[str] | Sequence[Sequence[str]],
+        values: Sequence[str] | set[str] | Sequence[Sequence[str] | set[str]],
         sort: bool = False,
     ) -> str:
         """
@@ -1431,15 +1436,21 @@ class ConfigTask(AnalysisTask):
         maybe_sort = (lambda vals: sorted(vals)) if sort else (lambda vals: vals)
 
         # helper to perform the single representation, assuming already sorted values
-        def single_repr(values: Sequence[str]) -> str:
+        def single_repr(values: Sequence[str] | set[str]) -> str:
             if not values:
                 return None
+            if isinstance(values, set):
+                values = sorted(values)
             if len(values) == 1:
                 return values[0]
             return f"{len(values)}_{law.util.create_hash(values)}"
 
+        # cast sets
+        if isinstance(values, set):
+            values = sorted(values)
+
         # single case
-        if not isinstance(values[0], (list, tuple)):
+        if not isinstance(values[0], (list, tuple, set)):
             return single_repr(maybe_sort(values))
         # multi case with a single sequence
         if len(values) == 1:

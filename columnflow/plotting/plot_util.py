@@ -323,7 +323,10 @@ def remove_negative_contributions(hists: dict[Hashable, hist.Hist]) -> dict[Hash
     _hists = hists.copy()
     for proc_inst, h in hists.items():
         h = h.copy()
-        h.view().value[h.view().value < 0] = 0
+        view = h.view(flow=True)
+        neg_mask = view.value < 0
+        view.value[neg_mask] = 0.0
+        view.variance[neg_mask] = 0.0
         _hists[proc_inst] = h
     return _hists
 
@@ -522,11 +525,12 @@ def prepare_style_config(
 
 def prepare_stack_plot_config(
     hists: OrderedDict,
+    shift_insts: Sequence[od.Shift] | None = None,
     shape_norm: bool | None = False,
     hide_stat_errors: bool = False,
     merge_stat_errors: bool = False,
     show_syst_rate_change: bool = False,
-    shift_insts: Sequence[od.Shift] | None = None,
+    ratio_mark_out_of_range: bool = True,
     density: bool = False,
     **kwargs,
 ) -> OrderedDict:
@@ -674,8 +678,8 @@ def prepare_stack_plot_config(
                 "show_rate_change": show_syst_rate_change,
             },
             "ratio_kwargs": {
-                "syst_hists": mc_syst_hists,
-                "shift_insts": shift_insts,
+                "syst_hists": _mc_syst_hists,
+                "shift_insts": _shift_insts,
                 "norm": h_mc.values(),
                 "hatch_style": hatch_style,
             },
@@ -700,6 +704,8 @@ def prepare_stack_plot_config(
                 "norm": h_mc.values() * data_norm / mc_norm,
                 "error_type": "poisson_unweighted",
                 "density": density,
+                "show_zero_bins": False,
+                "mark_out_of_range": ratio_mark_out_of_range,
             }
 
         # suppress error bars by overriding `yerr`

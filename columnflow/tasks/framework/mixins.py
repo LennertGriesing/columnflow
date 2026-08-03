@@ -25,7 +25,7 @@ from columnflow.histogramming import HistProducer
 from columnflow.ml import MLModel
 from columnflow.inference import InferenceModel
 from columnflow.columnar_util import Route, ColumnCollection, ChunkedIOHandler, TaskArrayFunction
-from columnflow.config_util import expand_shift_sources
+from columnflow.config_util import expand_shift_sources, reduce_to_shift_sources
 from columnflow.util import maybe_import, DotDict, get_docs_url, get_code_url
 from columnflow.types import Callable
 
@@ -143,6 +143,7 @@ class CalibratorMixin(ArrayFunctionInstanceMixin, CalibratorClassMixin):
     exclude_params_repr = {"calibrator_inst"}
     exclude_params_sandbox = {"calibrator_inst"}
     exclude_params_remote_workflow = {"calibrator_inst"}
+    exclude_params_hash = {"calibrator_inst"}
 
     # decides whether the task itself invokes the calibrator
     invokes_calibrator = False
@@ -346,6 +347,7 @@ class CalibratorsMixin(ArrayFunctionInstanceMixin, CalibratorClassesMixin):
     exclude_params_repr = {"calibrator_insts"}
     exclude_params_sandbox = {"calibrator_insts"}
     exclude_params_remote_workflow = {"calibrator_insts"}
+    exclude_params_hash = {"calibrator_insts"}
 
     @classmethod
     def get_calibrator_dict(cls, params: dict[str, Any]) -> dict[str, Any]:
@@ -555,6 +557,7 @@ class SelectorMixin(ArrayFunctionInstanceMixin, SelectorClassMixin):
     exclude_params_repr = {"selector_inst"}
     exclude_params_sandbox = {"selector_inst"}
     exclude_params_remote_workflow = {"selector_inst"}
+    exclude_params_hash = {"selector_inst"}
 
     # decides whether the task itself invokes the selector
     invokes_selector = False
@@ -766,6 +769,7 @@ class ReducerMixin(ArrayFunctionInstanceMixin, ReducerClassMixin):
     exclude_params_repr = {"reducer_inst"}
     exclude_params_sandbox = {"reducer_inst"}
     exclude_params_remote_workflow = {"reducer_inst"}
+    exclude_params_hash = {"reducer_inst"}
 
     # decides whether the task itself invokes the reducer
     invokes_reducer = False
@@ -966,6 +970,7 @@ class ProducerMixin(ArrayFunctionInstanceMixin, ProducerClassMixin):
     exclude_params_repr = {"producer_inst"}
     exclude_params_sandbox = {"producer_inst"}
     exclude_params_remote_workflow = {"producer_inst"}
+    exclude_params_hash = {"producer_inst"}
 
     # decides whether the task itself invokes the producer
     invokes_producer = False
@@ -1169,6 +1174,7 @@ class ProducersMixin(ArrayFunctionInstanceMixin, ProducerClassesMixin):
     exclude_params_repr = {"producer_insts"}
     exclude_params_sandbox = {"producer_insts"}
     exclude_params_remote_workflow = {"producer_insts"}
+    exclude_params_hash = {"producer_insts"}
 
     @classmethod
     def get_producer_dict(cls, params: dict[str, Any]) -> dict[str, Any]:
@@ -1284,6 +1290,7 @@ class MLModelMixinBase(ConfigTask):
     exclude_params_repr = {"ml_model_inst"}
     exclude_params_sandbox = {"ml_model_inst"}
     exclude_params_remote_workflow = {"ml_model_inst"}
+    exclude_params_hash = {"ml_model_inst"}
     exclude_params_repr_empty = {"ml_model"}
 
     @property
@@ -1554,6 +1561,7 @@ class PreparationProducerMixin(ArrayFunctionInstanceMixin, MLModelMixin):
     exclude_params_repr = {"preparation_producer_inst"}
     exclude_params_sandbox = {"preparation_producer_inst"}
     exclude_params_remote_workflow = {"preparation_producer_inst"}
+    exclude_params_hash = {"preparation_producer_inst"}
 
     @classmethod
     def invokes_preparation_producer(cls, params) -> bool:
@@ -1816,6 +1824,7 @@ class HistProducerMixin(ArrayFunctionInstanceMixin, HistProducerClassMixin):
     exclude_params_repr = {"hist_producer_inst"}
     exclude_params_sandbox = {"hist_producer_inst"}
     exclude_params_remote_workflow = {"hist_producer_inst"}
+    exclude_params_hash = {"hist_producer_inst"}
 
     # decides whether the task itself invokes the hist_producer
     invokes_hist_producer = False
@@ -1972,6 +1981,7 @@ class InferenceModelMixin(InferenceModelClassMixin):
     exclude_params_repr = {"inference_model_inst"}
     exclude_params_sandbox = {"inference_model_inst"}
     exclude_params_remote_workflow = {"inference_model_inst"}
+    exclude_params_hash = {"inference_model_inst"}
 
     @classmethod
     def build_inference_model_inst(
@@ -2044,9 +2054,9 @@ class CategoriesMixin(ConfigTask):
 
     categories = law.CSVParameter(
         default=(RESOLVE_DEFAULT,),
-        description="comma-separated category names or patterns to select; can also be the key of a mapping defined in "
-        "'category_groups' auxiliary data of the config; when empty, uses the auxiliary data enty 'default_categories' "
-        "when set; empty default",
+        description="comma-separated category names or patterns to select; can also contain keys of a mapping defined "
+        "in 'category_groups' auxiliary data of the config; when empty or 'DEFAULT', uses the auxiliary data entry "
+        "'default_categories'; default: DEFAULT",
         brace_expand=True,
         parse_empty=True,
     )
@@ -2068,15 +2078,18 @@ class CategoriesMixin(ConfigTask):
                 categories = tuple(cls.default_categories)
 
             # additional resolution and expansion requires a config
+            categories_lookup = categories
             if (container := cls._get_config_container(params)):
-                # when still empty, get the config default
+                # resolve config defaults
                 categories = cls.resolve_config_default(
-                    param=params.get("categories"),
+                    param=categories,
                     task_params=params,
                     container=container,
                     default_str="default_categories",
                     multi_strategy="union",
                 )
+                if categories:
+                    categories_lookup = categories
                 # resolve them
                 categories = cls.find_config_objects(
                     names=categories,
@@ -2089,7 +2102,7 @@ class CategoriesMixin(ConfigTask):
 
             # complain when no categories were found
             if not categories and not cls.allow_empty_categories:
-                raise ValueError(f"no categories found matching {params['categories']}")
+                raise ValueError(f"no categories found matching '{categories_lookup}'")
 
             # sort them
             if cls.sort_categories:
@@ -2117,16 +2130,15 @@ class VariablesMixin(ConfigTask):
 
     variables = law.CSVParameter(
         default=(RESOLVE_DEFAULT,),
-        description="comma-separated variable names or patterns to select; can also be the key of a mapping defined in "
-        "the 'variable_group' auxiliary data of the config; when empty, uses all variables of the config; empty "
-        "default",
+        description="comma-separated variable names or patterns to select; can also contain keys of a mapping defined "
+        "in 'variable_groups' auxiliary data of the config; when empty or 'DEFAULT', uses the auxiliary data entry "
+        "'default_variables'; default: DEFAULT",
         brace_expand=True,
         parse_empty=True,
     )
 
     default_variables = None
     allow_empty_variables = False
-    allow_missing_variables = False
 
     @classmethod
     def resolve_param_values_post_init(cls, params: dict[str, Any]) -> dict[str, Any]:
@@ -2138,22 +2150,23 @@ class VariablesMixin(ConfigTask):
         # resolve variables
         if (variables := params.get("variables", law.no_value)) != law.no_value:
             # when empty, use the ones defined on class level
-            if variables == (RESOLVE_DEFAULT,):
-                variables = ()
-            if variables == () and cls.default_variables:
-                variables = law.util.make_tuple(cls.default_variables)
+            if variables in ((), (RESOLVE_DEFAULT,)) and cls.default_variables:
+                variables = tuple(cls.default_variables)
 
             # additional resolution and expansion requires a config
+            variables_lookup = variables
             if (container := cls._get_config_container(params)):
-                # when still empty, get the config default
+                # resolve config defaults
                 variables = cls.resolve_config_default_and_groups(
-                    param=params.get("variables"),
+                    param=variables,
                     task_params=params,
                     container=container,
                     default_str="default_variables",
                     groups_str="variable_groups",
                     multi_strategy="union",
                 )
+                if variables:
+                    variables_lookup = variables
                 # since there can be multi-dimensional variables, resolve each part separately
                 resolved_variables = []
                 for variable in variables:
@@ -2171,9 +2184,9 @@ class VariablesMixin(ConfigTask):
                     resolved_variables.extend(map(cls.join_multi_variable, itertools.product(*resolved_parts)))
                 variables = law.util.make_unique(resolved_variables)
 
-            # when still empty, complaion or fallback to using all known variables
-            if not variables and not cls.allow_missing_variables:
-                raise ValueError(f"no variables found matching '{','.join(params['variables'])}'")
+            # complain when no variables were found
+            if not variables and not cls.allow_empty_variables:
+                raise ValueError(f"no variables found matching '{variables_lookup}'")
 
             params["variables"] = tuple(variables)
 
@@ -2278,6 +2291,13 @@ class DatasetsProcessesMixin(ConfigTask):
             processes_orig = processes
             if processes != law.no_value:
                 if processes:
+                    processes = cls.resolve_config_default_and_groups(
+                        param=processes or (RESOLVE_DEFAULT,),
+                        task_params=params,
+                        container=config_inst,
+                        default_str="default_process_group",
+                        groups_str="process_groups",
+                    )
                     processes = cls.find_config_objects(
                         names=processes,
                         container=config_inst,
@@ -2309,6 +2329,13 @@ class DatasetsProcessesMixin(ConfigTask):
             if datasets != law.no_value:
                 datasets_orig = datasets
                 if datasets:
+                    datasets = cls.resolve_config_default_and_groups(
+                        param=datasets or (RESOLVE_DEFAULT,),
+                        task_params=params,
+                        container=config_inst,
+                        default_str="default_dataset_group",
+                        groups_str="dataset_groups",
+                    )
                     datasets = cls.find_config_objects(
                         names=datasets,
                         container=config_inst,
@@ -2428,13 +2455,21 @@ class DatasetsProcessesMixin(ConfigTask):
 
         super().get_known_shifts(params, shifts)
 
+    @classmethod
+    def _datasets_repr(cls, datasets: Sequence[str]) -> str:
+        return cls._multi_sequence_repr(datasets, sort=True)
+
     @property
     def datasets_repr(self) -> str:
-        return self._multi_sequence_repr(self.datasets, sort=True)
+        return self._datasets_repr(self.datasets)
+
+    @classmethod
+    def _processes_repr(cls, processes: Sequence[str]) -> str:
+        return cls._multi_sequence_repr(processes, sort=True)
 
     @property
     def processes_repr(self) -> str:
-        return self._multi_sequence_repr(self.processes, sort=True)
+        return self._processes_repr(self.processes)
 
 
 class ShiftSourcesMixin(ConfigTask):
@@ -2484,18 +2519,13 @@ class ShiftSourcesMixin(ConfigTask):
             # convert back to sources and validate
             sources = []
             if shifts:
-                sources = cls.reduce_shifts(shifts)
+                sources = reduce_to_shift_sources(shifts)
 
-                # reduce shifts based on known shifts
-                if "known_shifts" not in params:
+                # reduce shifts based on known ones
+                if (known_shifts := params.get("known_shifts")) is None:
                     raise ValueError("known_shifts must be set before resolving shift sources")
-                sources = [
-                    source for source in sources
-                    if (
-                        source == "nominal" or
-                        (f"{source}_up" in params["known_shifts"] and f"{source}_down" in params["known_shifts"])
-                    )
-                ]
+                is_known = lambda s: f"{s}_{od.Shift.UP}" in known_shifts and f"{s}_{od.Shift.DOWN}" in known_shifts
+                sources = [source for source in sources if source == "nominal" or is_known(source)]
 
             # complain when no sources were found
             if not sources and not cls.allow_empty_shift_sources:
@@ -2509,10 +2539,6 @@ class ShiftSourcesMixin(ConfigTask):
             params["shift_sources"] = tuple(sources)
 
         return params
-
-    @classmethod
-    def reduce_shifts(cls, shifts: Sequence[str] | set[str]) -> list[str]:
-        return list(set(od.Shift.split_name(shift)[0] for shift in shifts))
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -2575,13 +2601,13 @@ class ChunkedIOMixin(ConfigTask):
     check_finite_output = luigi.BoolParameter(
         default=False,
         significant=False,
-        description="when True, checks whether output arrays only contain finite values before "
-        "writing to them to file",
+        description="when True, checks whether output arrays only contain finite values before writing to them to "
+        "file; default: False",
     )
     check_overlapping_inputs = luigi.BoolParameter(
         default=False,
         significant=False,
-        description="when True, checks whether columns if input arrays overlap in at least one field",
+        description="when True, checks whether columns if input arrays overlap in at least one field; default: False",
     )
 
     # number of events per row group in the merged file
@@ -2605,6 +2631,7 @@ class ChunkedIOMixin(ConfigTask):
         """
         from columnflow.columnar_util import get_ak_routes
 
+        non_finite_routes = []
         for route in get_ak_routes(ak_array):
             # flatten
             flat = ak.flatten(route.apply(ak_array), axis=None)
@@ -2615,7 +2642,13 @@ class ChunkedIOMixin(ConfigTask):
                     continue
             # check finiteness
             if ak.any(~np.isfinite(flat)):
-                raise ValueError(f"found one or more non-finite values in column '{route.column}' of array {ak_array}")
+                non_finite_routes.append(route)
+
+        if non_finite_routes:
+            raise ValueError(
+                f"found non-finite values in {len(non_finite_routes)} column(s) of array {ak_array}:\n  - " +
+                "\n  - ".join(r.column for r in non_finite_routes),
+            )
 
     @classmethod
     def raise_if_overlapping(cls, ak_arrays: Sequence[ak.Array]) -> None:
@@ -2665,7 +2698,12 @@ class ChunkedIOMixin(ConfigTask):
         # iterate in the handler context
         with handler:
             self.chunked_io = handler
-            msg = f"iterate through {handler.n_entries:_} events in {handler.n_chunks} chunks ..."
+            filter_msg = (
+                ""
+                if handler.n_entries_filtered == handler.n_entries_total
+                else f" (filtered out of {handler.n_entries_total:_})"
+            )
+            msg = f"iterate through {handler.n_entries_filtered:_}{filter_msg} events in {handler.n_chunks} chunks ..."
             try:
                 # measure runtimes excluding IO
                 loop_durations = []
@@ -2690,11 +2728,29 @@ class ChunkedIOMixin(ConfigTask):
         # eager cleanup
         del handler
 
-    def get_read_options(self, inputs: list[Any], *, first_is_nano: bool = False) -> list[dict[str, Any] | None] | None:
+    def get_open_options(
+        self,
+        inputs: list[Any],
+        *,
+        first_is_nano: bool = False,
+    ) -> list[dict[str, Any] | None] | None:
+        """
+        Hook that takes a list of *input* files handled during iteration and returns a list of dictionaries that
+        represent *open_options* per input file. When *first_is_nano* is True, the first input file is an external
+        NanoAOD file.
+        """
+        return len(inputs) * [None]
+
+    def get_read_options(
+        self,
+        inputs: list[Any],
+        *,
+        first_is_nano: bool = False,
+    ) -> list[dict[str, Any] | None] | None:
         """
         Hook that takes a list of *input* files handled during iteration and returns a list of dictionaries that
         represent *read_options* per input file. When *first_is_nano* is True, the first input file is an external
-        NanoAOD file that might require different read options.
+        NanoAOD file.
         """
         read_options = [None] * len(inputs)
         if inputs and first_is_nano and inputs[0].ext() == "root":
@@ -2707,6 +2763,45 @@ class ChunkedIOMixin(ConfigTask):
             if callable(func := self.config_inst.x("get_nano_read_options", None))
             else None
         )
+
+    def get_filter_configs(
+        self,
+        inputs: list[Any],
+        *,
+        first_is_nano: bool = False,
+    ) -> list[ChunkedIOHandler.FilterConfig | None] | None:
+        """
+        Hook that takes a list of *input* files handled during iteration and returns a list of
+        :py:func:`ChunkedIOHandler.FilterConfig` instances that are passed to the :py:class:`ChunkedIOHandler` for
+        filtering chunks. When *first_is_nano* is True, the first input file is an external NanoAOD file.
+        """
+        filter_configs = [None] * len(inputs)
+        if inputs and first_is_nano and inputs[0].ext() == "root":
+            filter_configs[0] = self._get_nano_filter_config(inputs[0])
+        return filter_configs
+
+    def _get_nano_filter_config(self, target: law.FileSystemFileTarget) -> ChunkedIOHandler.FilterConfig | None:
+        if (nano_filter_config := self.config_inst.x("nano_filter_config", None)) is None:
+            return None
+
+        if not isinstance(nano_filter_config, ChunkedIOHandler.FilterConfig):
+            try:
+                nano_filter_config = ChunkedIOHandler.FilterConfig(*nano_filter_config)
+            except TypeError as e:
+                raise TypeError(
+                    f"invalid 'nano_filter_config' for {self.config_mode()} config task {self!r}: {e}",
+                ) from e
+
+        return nano_filter_config
+
+    def adjust_chunks(self, chunks: list[ak.Array | np.ndarray]) -> list[ak.Array | np.ndarray]:
+        """
+        Hook that takes a list of *chunks* handled during iteration and returns an adjusted or amended list of chunks.
+        The default implementation returns the chunks unchanged.
+        """
+        if callable(adjust_func := self.config_inst.x("adjust_nano_chunks", None)):
+            chunks = adjust_func(self, chunks)
+        return chunks
 
 
 class HistHookMixin(ConfigTask):

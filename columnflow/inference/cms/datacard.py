@@ -429,6 +429,11 @@ class DatacardWriter(object):
                                 continue
                             effect = tuple(((2.0 - e) if i == flip_index else e) for i, e in enumerate(effect))
 
+                        else:
+                            raise ValueError(
+                                f"unsupported transormation '{trafo}' for rate-type parameter '{param_name}'",
+                            )
+
                 elif param_obj.type.is_shape:
                     # apply transformations one by one
                     for trafo in param_obj.transformations:
@@ -622,17 +627,18 @@ class DatacardWriter(object):
 
             # warn in case of flow content
             if cat_obj.flow_strategy in {FlowStrategy.warn, FlowStrategy.move}:
+                move_msg = "; will be moved to first/last bin" if cat_obj.flow_strategy == FlowStrategy.move else ""
                 if underflow[0]:
                     logger.warning_once(
                         f"underflow_warn_{self.inference_model_inst.cls_name}_{cat_obj.name}_{name}",
                         f"underflow content detected in category '{cat_obj.name}' for histogram "
-                        f"'{name}' ({underflow[0] / view.value.sum() * 100:.1f}% of integral)",
+                        f"'{name}' ({underflow[0] / view.value.sum() * 100:.1f}% of integral){move_msg}",
                     )
                 if overflow[0]:
                     logger.warning_once(
                         f"overflow_warn_{self.inference_model_inst.cls_name}_{cat_obj.name}_{name}",
                         f"overflow content detected in category '{cat_obj.name}' for histogram "
-                        f"'{name}' ({overflow[0] / view.value.sum() * 100:.1f}% of integral)",
+                        f"'{name}' ({overflow[0] / view.value.sum() * 100:.1f}% of integral){move_msg}",
                     )
 
             # stop here in case of warn-only
@@ -866,6 +872,11 @@ class DatacardWriter(object):
                             v_down.value[down_mask] = v_nom.value[down_mask] - abs_diffs_down[down_mask]
                             v_down.value[up_mask] = v_nom.value[up_mask] - abs_diffs_up[up_mask]
                             v_down.variance[up_mask] = v_up.variance[up_mask]
+
+                        else:
+                            raise ValueError(
+                                f"unsupported transormation '{trafo}' for shape-type parameter '{param_obj.name}'",
+                            )
 
                     # custom hook to modify the shapes
                     h_nom, h_down, h_up = self.modify_parameter_shape(

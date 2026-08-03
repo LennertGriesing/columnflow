@@ -19,6 +19,7 @@ from columnflow.plotting.plot_util import (
     prepare_stack_plot_config,
     prepare_style_config,
     remove_residual_axis,
+    remove_residual_axis_single,
     apply_variable_settings,
     apply_process_settings,
     apply_process_scaling,
@@ -51,6 +52,7 @@ def plot_variable_stack(
     yscale: str | None = "",
     process_settings: dict | None = None,
     variable_settings: dict | None = None,
+    print_yields: bool = True,
     **kwargs,
 ) -> plt.Figure:
     variable_inst = variable_insts[0]
@@ -59,6 +61,7 @@ def plot_variable_stack(
     hists, process_style_config = apply_process_settings(hists, process_settings)
     # variable-based settings (rebinning, slicing, flow handling)
     hists, variable_style_config = apply_variable_settings(hists, variable_insts, variable_settings)
+
     # remove data in bins where sensitivity exceeds some threshold
     blinding_threshold = kwargs.get("blinding_threshold", None)
     if blinding_threshold:
@@ -70,6 +73,14 @@ def plot_variable_stack(
 
     # process scaling
     hists = apply_process_scaling(hists)
+
+    # optionally print process yields after blinding threshold, negative contribution removal and process scaling
+    if print_yields:
+        print("visible yields:")
+        for proc_inst, h in hists.items():
+            print(f"  {proc_inst.name}: {remove_residual_axis_single(h, 'shift', select_value='nominal').sum().value}")
+        print("")
+
     # density scaling per bin
     if density:
         hists = apply_density(hists, density)
@@ -88,7 +99,7 @@ def plot_variable_stack(
 
     # prepare the plot config
     plot_config = prepare_stack_plot_config(
-        hists,
+        hists=hists,
         shape_norm=shape_norm,
         shift_insts=shift_insts,
         density=density,
@@ -219,7 +230,7 @@ def plot_variable_variants(
         yscale=yscale,
     )
     # plot-function specific changes
-    default_style_config["rax_cfg"]["ylim"] = (0., 1.1)
+    default_style_config["rax_cfg"]["ylim"] = (0.0, 1.1)
     default_style_config["rax_cfg"]["ylabel"] = "Step / Initial"
 
     style_config = law.util.merge_dicts(default_style_config, style_config, deep=True)
@@ -362,7 +373,7 @@ def plot_cutflow(
     hists = hists_merge_cutflow_steps(hists)
 
     # setup plotting config
-    plot_config = prepare_stack_plot_config(hists, shape_norm=shape_norm, **kwargs)
+    plot_config = prepare_stack_plot_config(hists=hists, shape_norm=shape_norm, **kwargs)
 
     if shape_norm:
         # switch normalization to normalizing to `initial step` bin

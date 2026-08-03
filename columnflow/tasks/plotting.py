@@ -4,10 +4,12 @@
 Tasks to plot different types of histograms.
 """
 
+from __future__ import annotations
+
 import itertools
 import functools
 import threading
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
 from abc import abstractmethod
 
 import law
@@ -17,19 +19,30 @@ import order as od
 from columnflow.tasks.framework.base import Requirements, ShiftTask
 from columnflow.tasks.framework.mixins import (
     CalibratorClassesMixin, SelectorClassMixin, ReducerClassMixin, ProducerClassesMixin, HistProducerClassMixin,
-    CategoriesMixin, ShiftSourcesMixin, HistHookMixin, MLModelsMixin,
+    DatasetsProcessesMixin, CategoriesMixin, ShiftSourcesMixin, HistHookMixin, MLModelsMixin,
 )
 from columnflow.tasks.framework.plotting import (
-    PlotBase, PlotBase1D, PlotBase2D, ProcessPlotSettingMixin, VariablePlotSettingMixin,
+    PlotBase, PlotBase1D, PlotBase2D, PlotBase1DWithErrorBands, ProcessPlotSettingMixin, VariablePlotSettingMixin,
 )
 from columnflow.tasks.framework.decorators import view_output_plots
 from columnflow.tasks.framework.remote import RemoteWorkflow
 from columnflow.tasks.histograms import MergeHistograms, MergeShiftedHistograms
 from columnflow.plotting import check_multi_variable_support, check_multi_category_support
-from columnflow.util import DotDict, dev_sandbox, dict_add_strict
+from columnflow.util import DotDict, dev_sandbox, maybe_import
 from columnflow.hist_util import add_missing_shifts, sum_hists, select_category_bins
 from columnflow.config_util import get_shift_from_configs, expand_shift_sources
-from columnflow.types import Any
+from columnflow.types import TYPE_CHECKING, TypeAlias, Any
+
+if TYPE_CHECKING:
+    hist = maybe_import("hist")
+
+
+# type aliases for more verbose type hints
+CatVarPair: TypeAlias = tuple[str, str]
+ProcHists: TypeAlias = dict[od.Process, "hist.Hist"]
+ConfigHists: TypeAlias = dict[od.Config, ProcHists]
+HistDicts: TypeAlias = dict[CatVarPair, ConfigHists]
+MergedHistDicts: TypeAlias = dict[CatVarPair, ProcHists]
 
 
 class _PlotVariablesBase(
@@ -52,6 +65,14 @@ class _PlotVariablesBase(
 
 
 class PlotVariablesBase(_PlotVariablesBase):
+    """
+    Base class for all variable plots.
+
+    Note that instances of this class require attributes ``datatsets`` and ``processes`` which are not defined yet. In
+    most cases, this is achieved by simply inheriting from :py:class:`DatasetsProcessesMixin`. However, this is not
+    done by default to allow other tasks to define these attributes in different ways (e.g. dynamically, depending on
+    other configurations).
+    """
 
     multi_variable = luigi.BoolParameter(
         default=False,
@@ -105,11 +126,6 @@ class PlotVariablesBase(_PlotVariablesBase):
         if self.multi_variable and self.multi_category:
             raise Exception("cannot use --multi-variable and --multi-category at the same time")
 
-    def store_parts(self) -> law.util.InsertableDict:
-        parts = super().store_parts()
-        parts.insert_before("version", "datasets", f"datasets_{self.datasets_repr}")
-        return parts
-
     def create_branch_map(self):
         self._check_multi_flags()
         keys = []
@@ -121,6 +137,30 @@ class PlotVariablesBase(_PlotVariablesBase):
             keys.append("variable")
             seqs.append(self.variables)
         return [DotDict(zip(keys, vals)) for vals in itertools.product(*seqs)]
+
+    @abstractmethod
+    def requires_histograms(self, config_inst: od.Config, dataset_name: str, **kwargs) -> Any:
+        ...
+
+    def requires(self):
+        reqs = {}
+
+        if self.is_branch() and self.bypass_branch_requirements:
+            return reqs
+
+        for config_inst, datasets in zip(self.config_insts, self.datasets):
+            reqs[config_inst.name] = {
+                d: self.requires_histograms(
+                    config_inst=config_inst,
+                    dataset_name=d,
+                    branch=-1,
+                    _prefer_cli={"variables"},
+                )
+                for d in datasets
+                if d in config_inst.datasets
+            }
+
+        return reqs
 
     def workflow_requires(self):
         reqs = super().workflow_requires()
@@ -134,9 +174,77 @@ class PlotVariablesBase(_PlotVariablesBase):
             self._branch_tasks = None
             self.get_branch_tasks(bypass_branch_requirements=True)
 
+    def store_parts(self) -> law.util.InsertableDict:
+        parts = super().store_parts()
+        if (datasets_repr := self.datasets_repr):
+            parts.insert_before("version", "datasets", f"datasets_{datasets_repr}")
+        return parts
+
+    def plot_parts(self) -> law.util.InsertableDict:
+        parts = super().plot_parts()
+
+        self._check_multi_flags()
+
+        if (processes_repr := self.processes_repr):
+            parts["processes"] = f"proc_{processes_repr}"
+
+        if self.multi_category:
+            parts["category"] = f"cats_{self.categories_repr}"
+        else:
+            parts["category"] = f"cat_{self.branch_data.category}"
+
+        if self.multi_variable:
+            parts["variables"] = f"vars_{self.variables_repr}"
+        else:
+            parts["variable"] = f"var_{self.branch_data.variable}"
+
+        hooks_repr = self.hist_hooks_repr
+        if hooks_repr:
+            parts["hook"] = f"hooks_{hooks_repr}"
+
+        return parts
+
+    def output(self):
+        return {
+            "plots": [self.target(name) for name in self.get_plot_names("plot")],
+        }
+
     @abstractmethod
     def get_plot_shifts(self):
-        return
+        ...
+
+    def update_hists_after_hooks(
+        self,
+        hists: ConfigHists,
+        category_name: str,
+        variable_name: str,
+    ) -> ConfigHists:
+        # hook to update histograms right after hist hooks have been applied
+        return hists
+
+    def update_hists_before_config_merging(
+        self,
+        hists: ConfigHists,
+        category_name: str,
+        variable_name: str,
+    ) -> ConfigHists:
+        # hook to update histograms right before merging across different config instances
+        return hists
+
+    def update_hists_before_plotting(
+        self,
+        hists: MergedHistDicts,
+    ) -> MergedHistDicts:
+        # hook to update histograms right before plotting
+        return hists
+
+    def update_shifts_before_plotting(
+        self,
+        shifts: list[od.Shift],
+        hists: MergedHistDicts,
+    ) -> list[od.Shift]:
+        # hook to update shifts right before plotting
+        return shifts
 
     @property
     def config_inst(self):
@@ -228,14 +336,11 @@ class PlotVariablesBase(_PlotVariablesBase):
         config_process_map, process_shift_map = self.get_config_process_map()
 
         # read histograms per variable name, config and process
-        hists: dict[tuple[str, str], dict[od.Config, dict[od.Process, hist.Hist]]] = {
-            tpl: {}
-            for tpl in category_variable_combis
-        }
+        hists: HistDicts = {tpl: {} for tpl in category_variable_combis}
         with self.publish_step(f"plotting {','.join(variables)} in {','.join(categories)}"):
             inputs = self.input() or self.workflow_input().merged_hists
             for cat_name, var_name in category_variable_combis:
-                hist_key = (cat_name, var_name)
+                hist_key: CatVarPair = (cat_name, var_name)
                 for i, (config, dataset_dict) in enumerate(inputs.items()):
                     config_inst = self.config_insts[i]
                     category_inst = config_inst.get_category(cat_name)
@@ -284,7 +389,7 @@ class PlotVariablesBase(_PlotVariablesBase):
                         del h_in
 
                     # after merging all processes, sort the histograms by process order and store them
-                    hists[hist_key][config_inst] = {
+                    hists[hist_key][config_inst]: ProcHists = {
                         proc_inst: hists_config[proc_inst]
                         for proc_inst in sorted(
                             hists_config.keys(),
@@ -306,6 +411,39 @@ class PlotVariablesBase(_PlotVariablesBase):
                     hook_kwargs={"category_name": cat_name, "variable_name": var_name},
                 )
 
+                # update histograms after hooks
+                hists[hist_key] = self.update_hists_after_hooks(
+                    hists=hists[hist_key],
+                    category_name=cat_name,
+                    variable_name=var_name,
+                )
+
+                # axis selections and reductions
+                for config_inst, proc_hists in hists[hist_key].items():
+                    for process_inst, h in proc_hists.items():
+                        # determine expected shifts from intersection of requested shifts and those known for the process
+                        process_shifts = (
+                            process_shift_map[process_inst.name]
+                            if process_inst.name in process_shift_map
+                            else {"nominal"}
+                        )
+                        expected_shifts = (process_shifts & plot_shift_names) or (process_shifts & {"nominal"})
+                        if not expected_shifts:
+                            raise Exception(f"no shifts to plot found for process {process_inst.name}")
+                        # select shifts
+                        h = h[{"shift": [hist.loc(s_name) for s_name in expected_shifts if s_name in h.axes["shift"]]}]
+                        # select and reduce categories
+                        h = select_category_bins(h, category_inst, use_leaves=True, prefer_parents=True, reduce=True)
+                        # replace
+                        proc_hists[process_inst] = h
+
+                # update histograms before config merging
+                hists[hist_key] = self.update_hists_before_config_merging(
+                    hists=hists[hist_key],
+                    category_name=cat_name,
+                    variable_name=var_name,
+                )
+
                 # merge configs
                 if len(self.config_insts) != 1:
                     process_memory = {}
@@ -321,26 +459,9 @@ class PlotVariablesBase(_PlotVariablesBase):
                 else:
                     hists[hist_key] = hists[hist_key][self.config_inst]
 
-                # axis selections and reductions
-                _hists = OrderedDict()
-                for process_inst in hists[hist_key].keys():
-                    h = hists[hist_key][process_inst]
-                    # determine expected shifts from intersection of requested shifts and those known for the process
-                    process_shifts = (
-                        process_shift_map[process_inst.name]
-                        if process_inst.name in process_shift_map
-                        else {"nominal"}
-                    )
-                    expected_shifts = (process_shifts & plot_shift_names) or (process_shifts & {"nominal"})
-                    if not expected_shifts:
-                        raise Exception(f"no shifts to plot found for process {process_inst.name}")
-                    # select shifts
-                    h = h[{"shift": [hist.loc(s_name) for s_name in expected_shifts if s_name in h.axes["shift"]]}]
-                    # select and reduce categories
-                    h = select_category_bins(h, category_inst, use_leaves=True, prefer_parents=True, reduce=True)
-                    # store
-                    _hists[process_inst] = h
-                hists[hist_key] = _hists
+            # update histograms and shifts before being passed to plot function
+            hists = self.update_hists_before_plotting(hists)
+            plot_shifts = self.update_shifts_before_plotting(plot_shifts, hists)
 
             # copy process instances once so that their auxiliary data fields can be used as a storage for
             # process-specific plot parameters later on in plot scripts without affecting the original instances
@@ -400,6 +521,7 @@ class PlotVariablesBase(_PlotVariablesBase):
 
 class PlotVariablesBaseSingleShift(
     ShiftTask,
+    DatasetsProcessesMixin,
     PlotVariablesBase,
 ):
     # use the MergeHistograms task to trigger upstream TaskArrayFunction initialization
@@ -412,55 +534,14 @@ class PlotVariablesBaseSingleShift(
         MergeHistograms=MergeHistograms,
     )
 
-    def requires(self):
-        reqs = {}
-
-        if self.is_branch() and self.bypass_branch_requirements:
-            return reqs
-
-        for config_inst, datasets in zip(self.config_insts, self.datasets):
-            reqs[config_inst.name] = {}
-            for d in datasets:
-                if d not in config_inst.datasets:
-                    continue
-                reqs[config_inst.name][d] = self.reqs.MergeHistograms.req_different_branching(
-                    self,
-                    config=config_inst.name,
-                    shift=self.global_shift_insts[config_inst].name,
-                    dataset=d,
-                    branch=-1,
-                    _prefer_cli={"variables"},
-                )
-
-        return reqs
-
-    def plot_parts(self) -> law.util.InsertableDict:
-        parts = super().plot_parts()
-
-        self._check_multi_flags()
-
-        parts["processes"] = f"proc_{self.processes_repr}"
-
-        if self.multi_category:
-            parts["category"] = f"cats_{self.categories_repr}"
-        else:
-            parts["category"] = f"cat_{self.branch_data.category}"
-
-        if self.multi_variable:
-            parts["variables"] = f"vars_{self.variables_repr}"
-        else:
-            parts["variable"] = f"var_{self.branch_data.variable}"
-
-        hooks_repr = self.hist_hooks_repr
-        if hooks_repr:
-            parts["hook"] = f"hooks_{hooks_repr}"
-
-        return parts
-
-    def output(self):
-        return {
-            "plots": [self.target(name) for name in self.get_plot_names("plot")],
+    def requires_histograms(self, config_inst: od.Config, dataset_name: str, **kwargs) -> Any:
+        kwargs |= {
+            "config": config_inst.name,
+            "dataset": dataset_name,
+            "shift": self.global_shift_insts[config_inst].name,
         }
+
+        return self.reqs.MergeHistograms.req_different_branching(self, **kwargs)
 
     def store_parts(self) -> law.util.InsertableDict:
         parts = super().store_parts()
@@ -548,25 +629,9 @@ class PlotVariablesPerProcess2D(
 
 class PlotVariablesBaseMultiShifts(
     ShiftSourcesMixin,
+    DatasetsProcessesMixin,
     PlotVariablesBase,
 ):
-    legend_title = luigi.Parameter(
-        default=law.NO_STR,
-        significant=False,
-        description="sets the title of the legend; when empty and only one process is present in "
-        "the plot, the process_inst label is used; empty default",
-    )
-    merge_stat_errors = law.OptionalBoolParameter(
-        default=None,
-        significant=False,
-        description="whether to merge stat error bands into the combined shift error; default: None",
-    )
-    show_syst_rate_change = law.OptionalBoolParameter(
-        default=None,
-        significant=False,
-        description="whether to show rate changing effects of systematics on the stack in the legend; default: None",
-    )
-
     # always ensure the nominal shift is present in shift sources
     enforce_nominal_shift_source = True
 
@@ -576,8 +641,6 @@ class PlotVariablesBaseMultiShifts(
     # use the MergeHistograms task to trigger upstream TaskArrayFunction initialization
     resolution_task_cls = MergeHistograms
 
-    exclude_index = True
-
     # upstream requirements
     reqs = Requirements(
         PlotVariablesBase.reqs,
@@ -585,89 +648,49 @@ class PlotVariablesBaseMultiShifts(
         MergeShiftedHistograms=MergeShiftedHistograms,
     )
 
+    exclude_index = True
+
+    def requires_histograms(self, config_inst: od.Config, dataset_name: str, **kwargs) -> Any:
+        kwargs |= {"config": config_inst.name, "dataset": dataset_name}
+
+        # return simple merged histograms for data
+        if config_inst.get_dataset(dataset_name).is_data:
+            return self.reqs.MergeHistograms.req_different_branching(self, **kwargs)
+
+        # for mc, return shifted histograms
+        return self.reqs.MergeShiftedHistograms.req_different_branching(self, **kwargs)
+
     def create_branch_map(self) -> list[DotDict]:
-        self._check_multi_flags()
-
-        keys = []
-        seqs = []
-        if not self.multi_category:
-            keys.append("category")
-            seqs.append(self.categories)
-
-        if not self.multi_variable:
-            keys.append("variable")
-            seqs.append(self.variables)
+        branch_data = super().create_branch_map()
 
         if not self.combine_shifts:
-            seqs.append([source for source in self.shift_sources if source != "nominal"])
-            keys.append("shift_source")
+            branch_data = [
+                {**d, "shift_source": source}
+                for d in branch_data
+                for source in self.shift_sources
+                if source != "nominal"
+            ]
 
-        return [DotDict(zip(keys, vals)) for vals in itertools.product(*seqs)]
+        return branch_data
 
-    def requires(self):
-        reqs = {}
-
-        if self.is_branch() and self.bypass_branch_requirements:
-            return reqs
-
-        def hist_req(config_inst, dataset_name, **kwargs):
-            # return simple merged histograms for data
-            if config_inst.get_dataset(dataset_name).is_data:
-                return self.reqs.MergeHistograms.req(self, **kwargs)
-            # for mc, return shifted histograms
-            return self.reqs.MergeShiftedHistograms.req(self, **kwargs)
-
-        for config_inst, datasets in zip(self.config_insts, self.datasets):
-            reqs[config_inst.name] = {}
-            for d in datasets:
-                if d not in config_inst.datasets:
-                    continue
-                reqs[config_inst.name][d] = hist_req(
-                    config_inst,
-                    d,
-                    config=config_inst.name,
-                    dataset=d,
-                    branch=-1,
-                    _exclude={"branches"},
-                    _prefer_cli={"variables"},
-                )
-
-        return reqs
+    def store_parts(self) -> law.util.InsertableDict:
+        parts = super().store_parts()
+        if "shift_sources" in parts:
+            parts.insert_before("datasets", "shift_sources", parts.pop("shift_sources"))
+        return parts
 
     def plot_parts(self) -> law.util.InsertableDict:
         parts = super().plot_parts()
 
-        self._check_multi_flags()
-
-        parts["processes"] = f"proc_{self.processes_repr}"
-
-        if self.multi_category:
-            parts["category"] = f"cats_{self.categories_repr}"
-        else:
-            parts["category"] = f"cat_{self.branch_data.category}"
-
-        if self.multi_variable:
-            parts["variables"] = f"vars_{self.variables_repr}"
-        else:
-            parts["variable"] = f"var_{self.branch_data.variable}"
-
         # shift source or sources
-        parts["shift_source"] = (
+        shift_source_repr = (
             f"shifts_{self.shift_sources_repr}"
             if self.combine_shifts
             else f"shift_{self.branch_data.shift_source}"
         )
-
-        # hooks
-        if (hooks_repr := self.hist_hooks_repr):
-            parts["hook"] = f"hooks_{hooks_repr}"
+        parts.insert_before("hook", "shift_source", shift_source_repr)
 
         return parts
-
-    def output(self):
-        return {
-            "plots": [self.target(name) for name in self.get_plot_names("plot")],
-        }
 
     def get_plot_shifts(self) -> list[od.Shift]:
         # only to be called by branch tasks
@@ -680,17 +703,9 @@ class PlotVariablesBaseMultiShifts(
 
         return shifts
 
-    def get_plot_parameters(self):
-        # convert parameters to usable values during plotting
-        params = super().get_plot_parameters()
-        dict_add_strict(params, "legend_title", None if self.legend_title == law.NO_STR else self.legend_title)
-        dict_add_strict(params, "merge_stat_errors", self.merge_stat_errors)
-        dict_add_strict(params, "show_syst_rate_change", self.show_syst_rate_change)
-        return params
-
 
 class PlotShiftedVariables1D(
-    PlotBase1D,
+    PlotBase1DWithErrorBands,
     PlotVariablesBaseMultiShifts,
 ):
     plot_function = PlotBase.plot_function.copy(
@@ -700,7 +715,7 @@ class PlotShiftedVariables1D(
 
 
 class PlotShiftedVariablesPerShift1D(
-    PlotBase1D,
+    PlotBase1DWithErrorBands,
     PlotVariablesBaseMultiShifts,
 ):
     # this tasks creates one plot per shift
@@ -733,7 +748,9 @@ class PlotShiftedVariablesPerConfig1D(
         }
 
 
-class PlotShiftedVariablesPerShiftAndProcess1D(law.WrapperTask):
+class PlotShiftedVariablesPerShiftAndProcess1D(
+    law.WrapperTask,
+):
 
     # upstream requirements
     reqs = Requirements(
