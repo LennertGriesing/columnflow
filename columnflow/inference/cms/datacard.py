@@ -15,18 +15,18 @@ from columnflow import __version__ as cf_version
 from columnflow.inference import InferenceModel, ParameterType, ParameterTransformation, FlowStrategy
 from columnflow.hist_util import sum_hists
 from columnflow.util import DotDict, maybe_import, real_path, ensure_dir, safe_div, maybe_int
-from columnflow.types import TYPE_CHECKING, Sequence, Any, Union, Hashable
+from columnflow.types import TYPE_CHECKING, TypeAlias, Sequence, Any, Union, Hashable
 
 np = maybe_import("numpy")
 
 if TYPE_CHECKING:
     hist = maybe_import("hist")
 
-    # type aliases for nested histogram structs
-    ShiftHists = dict[Union[str, tuple[str, str]], hist.Hist]  # "nominal" or (param_name, "up|down") -> hists
-    ConfigHists = dict[str, ShiftHists]  # config name -> hists
-    ProcHists = dict[str, ConfigHists]  # process name -> hists
-    DatacardHists = dict[str, ProcHists]  # category name -> hists
+# type aliases for nested histogram structs
+ShiftHists: TypeAlias = dict[Union[str, tuple[str, str]], "hist.Hist"]  # "nominal" or (param_name, "up|down") -> hists
+ConfigHists: TypeAlias = dict[str, ShiftHists]  # config name -> hists
+ProcHists: TypeAlias = dict[str, ConfigHists]  # process name -> hists
+DatacardHists: TypeAlias = dict[str, ProcHists]  # category name -> hists
 
 
 logger = law.logger.get_logger(__name__)
@@ -70,6 +70,7 @@ class DatacardWriter(object):
             Configurable via *asymmetrize_if_large_threshold*.
         - :py:attr:`ParameterTransformation.normalize`: Normalizes shape variations such that their integrals match that
             of the nominal shape.
+        - :py:attr:`ParameterTransformation.centralize`: # TODO: not yet implemented
         - :py:attr:`ParameterTransformation.envelope`: Takes the bin-wise maximum in each direction of the up and down
             variations of shape-type parameters and constructs new shapes.
         - :py:attr:`ParameterTransformation.envelope_if_one_sided`: Same as above, but only in bins where up and down
@@ -95,28 +96,6 @@ class DatacardWriter(object):
     # minimum separator between columns
     col_sep = "  "
 
-    # specific sets of transformations
-    first_index_trafos = {
-        ParameterTransformation.effect_from_rate,
-        ParameterTransformation.effect_from_shape,
-        ParameterTransformation.effect_from_shape_if_flat,
-    }
-    shape_only_trafos = {
-        ParameterTransformation.effect_from_rate,
-        ParameterTransformation.normalize,
-        ParameterTransformation.envelope,
-        ParameterTransformation.envelope_if_one_sided,
-        ParameterTransformation.envelope_enforce_two_sided,
-    }
-    rate_only_trafos = {
-        ParameterTransformation.effect_from_shape,
-        ParameterTransformation.effect_from_shape_if_flat,
-        ParameterTransformation.asymmetrize,
-        ParameterTransformation.asymmetrize_if_large,
-        ParameterTransformation.flip_smaller_if_one_sided,
-        ParameterTransformation.flip_larger_if_one_sided,
-    }
-
     @classmethod
     def validate_model(cls, inference_model_inst: InferenceModel, silent: bool = False) -> bool:
         # perform parameter checks one after another, collect errors along the way
@@ -125,16 +104,16 @@ class DatacardWriter(object):
             # check the transformations
             _errors: list[str] = []
             for i, trafo in enumerate(param_obj.transformations):
-                if i != 0 and trafo in cls.first_index_trafos:
+                if i != 0 and trafo.requires_first_index:
                     _errors.append(
                         f"parameter transformation '{trafo}' must be the first one to apply, but found at index {i}",
                     )
-                if not param_obj.type.is_shape and trafo in cls.shape_only_trafos:
+                if not param_obj.type.is_shape and trafo.affects_shape_only:
                     _errors.append(
                         f"parameter transformation '{trafo}' only applies to shape-type parameters, but found type "
                         f"'{param_obj.type}'",
                     )
-                if not param_obj.type.is_rate and trafo in cls.rate_only_trafos:
+                if not param_obj.type.is_rate and trafo.affects_rate_only:
                     _errors.append(
                         f"parameter transformation '{trafo}' only applies to rate-type parameters, but found type "
                         f"'{param_obj.type}'",
@@ -428,11 +407,6 @@ class DatacardWriter(object):
                                 # skip one-sided effects
                                 continue
                             effect = tuple(((2.0 - e) if i == flip_index else e) for i, e in enumerate(effect))
-
-                        else:
-                            raise ValueError(
-                                f"unsupported transormation '{trafo}' for rate-type parameter '{param_name}'",
-                            )
 
                 elif param_obj.type.is_shape:
                     # apply transformations one by one
@@ -788,19 +762,20 @@ class DatacardWriter(object):
                             if param_obj.transformations[0] == ParameterTransformation.effect_from_shape_if_flat:
                                 # check if flatness criteria are met
                                 for h in [h_down, h_up]:
+                                    # !!! TODO: bug! the relative difference should be flat, not the actual shape
                                     values = h.view().value
                                     mean, std = values.mean(), values.std()
-                                    rel_deviation = safe_div(std, mean)
                                     max_rel_outlier = safe_div(max(abs(values - mean)), mean)
+                                    rel_deviation = safe_div(std, mean)
                                     is_flat = (
-                                        rel_deviation <= self.effect_from_shape_if_flat_max_deviation and
-                                        max_rel_outlier <= self.effect_from_shape_if_flat_max_outlier
+                                        max_rel_outlier <= self.effect_from_shape_if_flat_max_outlier and
+                                        rel_deviation <= self.effect_from_shape_if_flat_max_deviation
                                     )
                                     if not is_flat:
                                         param_obj.type = ParameterType.shape
                                         param_obj.transformations = type(param_obj.transformations)(
                                             trafo for trafo in param_obj.transformations[1:]
-                                            if trafo not in self.rate_only_trafos
+                                            if not trafo.affects_rate_only
                                         )
                                         break
                         else:
@@ -835,7 +810,6 @@ class DatacardWriter(object):
                             h_up *= safe_div(n, u)
 
                         elif trafo in {ParameterTransformation.envelope, ParameterTransformation.envelope_if_one_sided}:
-                            d, u = integral(h_down), integral(h_up)
                             v_nom = h_nom.view()
                             v_down = h_down.view()
                             v_up = h_up.view()
@@ -872,11 +846,6 @@ class DatacardWriter(object):
                             v_down.value[down_mask] = v_nom.value[down_mask] - abs_diffs_down[down_mask]
                             v_down.value[up_mask] = v_nom.value[up_mask] - abs_diffs_up[up_mask]
                             v_down.variance[up_mask] = v_up.variance[up_mask]
-
-                        else:
-                            raise ValueError(
-                                f"unsupported transormation '{trafo}' for shape-type parameter '{param_obj.name}'",
-                            )
 
                     # custom hook to modify the shapes
                     h_nom, h_down, h_up = self.modify_parameter_shape(

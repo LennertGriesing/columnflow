@@ -42,10 +42,10 @@ class ParameterTransformation(StrEnum):
         an asymmetric representation (using two values). Only applies to rate-type parameters.
     :cvar asymmetrize_if_large: Same as :py:attr:`asymmetrize`, but depending on a threshold on the size of the
         symmetric effect which can be subject to the serialization routine. Only applies to rate-type parameters.
-    :cvar normalize: Variations of shape-type parameters are changed such that their integral effect becomes identical
-        to the nominal one. Should only apply to shape-type parameters.
+    :cvar normalize: Variations of shape-type parameters are changed such that their integral effects become identical
+        to that of the nominal one. Should only apply to shape-type parameters.
     :cvar centralize: The nominal shape is moved, potentially on a bin-by-bin basis, to be right in the middle between
-        the two shape variations. Should only apply to shapes subject to a single shape-type parameter.
+        the two shape variations. Should only apply to shapes subject to no (other) shape-type parameter.
     :cvar envelope: Builds an evelope of the up and down variations of a shape-type parameter, potentially on a
         bin-by-bin basis. Only applies to shape-type parameters.
     :cvar envelope_if_one_sided: Same as :py:attr:`envelope`, but only if the shape variations are one-sided following
@@ -74,12 +74,28 @@ class ParameterTransformation(StrEnum):
     flip_smaller_if_one_sided = "flip_smaller_if_one_sided"
     flip_larger_if_one_sided = "flip_larger_if_one_sided"
 
+    # sets of instances for easier distinguishing (set below class creation)
+    _ignore_ = [
+        "_first_index_trafos",
+        "_shape_only_trafos",
+        "_rate_only_trafos",
+        "_rate_and_shape_trafos",
+        "_changing_rate_to_shape_trafos",
+        "_changing_shape_to_rate_trafos",
+        "_changing_nominal_trafos",
+    ]
+    first_index_trafos: set[ParameterTransformation]
+    shape_only_trafos: set[ParameterTransformation]
+    rate_only_trafos: set[ParameterTransformation]
+    rate_and_shape_trafos: set[ParameterTransformation]
+    changing_rate_to_shape_trafos: set[ParameterTransformation]
+    changing_shape_to_rate_trafos: set[ParameterTransformation]
+    changing_nominal_trafos: set[ParameterTransformation]
+
     @property
     def from_shape(self) -> bool:
         """
         Checks if the transformation is derived from shape.
-
-        :returns: *True* if the transformation is derived from shape, *False* otherwise.
         """
         return self in {
             self.effect_from_shape,
@@ -90,12 +106,110 @@ class ParameterTransformation(StrEnum):
     def from_rate(self) -> bool:
         """
         Checks if the transformation is derived from rate.
-
-        :returns: *True* if the transformation is derived from rate, *False* otherwise.
         """
         return self in {
             self.effect_from_rate,
         }
+
+    @property
+    def requires_first_index(self) -> bool:
+        """
+        Checks if the transformation must be applied first.
+        """
+        return self in self.first_index_trafos
+
+    @property
+    def affects_rate(self) -> bool:
+        """
+        Checks if the transformation affects rate-type parameters.
+        """
+        return self in self.rate_only_trafos or self in self.rate_and_shape_trafos
+
+    @property
+    def affects_rate_only(self) -> bool:
+        """
+        Checks if the transformation affects only rate-type parameters.
+        """
+        return self in self.rate_only_trafos
+
+    @property
+    def affects_shape(self) -> bool:
+        """
+        Checks if the transformation affects shape-type parameters.
+        """
+        return self in self.shape_only_trafos or self in self.rate_and_shape_trafos
+
+    @property
+    def affects_shape_only(self) -> bool:
+        """
+        Checks if the transformation affects only shape-type parameters.
+        """
+        return self in self.shape_only_trafos
+
+    @property
+    def changes_rate_to_shape(self) -> bool:
+        """
+        Checks if the transformation changes the parameter type from rate to shape.
+        """
+        return self in self.changing_rate_to_shape_trafos
+
+    @property
+    def changes_shape_to_rate(self) -> bool:
+        """
+        Checks if the transformation changes the parameter type from shape to rate.
+        """
+        return self in self.changing_shape_to_rate_trafos
+
+    @property
+    def changes_type(self) -> bool:
+        """
+        Checks if the transformation changes the parameter type.
+        """
+        return self.changes_rate_to_shape or self.changes_shape_to_rate
+
+    @property
+    def changes_nominal(self) -> bool:
+        """
+        Checks if the transformation changes the nominal histogram.
+        """
+        return self in self.changing_nominal_trafos
+
+
+# fill instance groups
+ParameterTransformation.first_index_trafos = {
+    ParameterTransformation.effect_from_rate,
+    ParameterTransformation.effect_from_shape,
+    ParameterTransformation.effect_from_shape_if_flat,
+}
+ParameterTransformation.shape_only_trafos = {
+    ParameterTransformation.effect_from_rate,
+    ParameterTransformation.normalize,
+    ParameterTransformation.envelope,
+    ParameterTransformation.envelope_if_one_sided,
+    ParameterTransformation.envelope_enforce_two_sided,
+}
+ParameterTransformation.rate_only_trafos = {
+    ParameterTransformation.effect_from_shape,
+    ParameterTransformation.effect_from_shape_if_flat,
+    ParameterTransformation.asymmetrize,
+    ParameterTransformation.asymmetrize_if_large,
+    ParameterTransformation.flip_smaller_if_one_sided,
+    ParameterTransformation.flip_larger_if_one_sided,
+}
+ParameterTransformation.rate_and_shape_trafos = {
+    ParameterTransformation.symmetrize,
+    ParameterTransformation.centralize,
+}
+ParameterTransformation.changing_rate_to_shape_trafos = {
+    ParameterTransformation.effect_from_rate,
+}
+ParameterTransformation.changing_shape_to_rate_trafos = {
+    ParameterTransformation.effect_from_shape,
+    ParameterTransformation.effect_from_shape_if_flat,
+}
+ParameterTransformation.changing_nominal_trafos = {
+    ParameterTransformation.centralize,
+}
 
 
 class ParameterTransformations(tuple):
@@ -107,7 +221,7 @@ class ParameterTransformations(tuple):
 
     def __new__(
         cls,
-        transformations: Sequence[ParameterTransformation | str],
+        *transformations: Sequence[ParameterTransformation | str],
     ) -> ParameterTransformations:
         """
         Creates a new instance of :py:class:`ParameterTransformations`.
@@ -115,10 +229,9 @@ class ParameterTransformations(tuple):
         :param transformations: A sequence of :py:class:`ParameterTransformation` or their string names.
         :returns: A new instance of :py:class:`ParameterTransformations`.
         """
-        # TODO: at this point one could object / complain in case incompatible trafos are used
         transformations = [
             (t if isinstance(t, ParameterTransformation) else ParameterTransformation[t])
-            for t in transformations
+            for t in law.util.flatten(transformations)
         ]
 
         # initialize
@@ -141,3 +254,21 @@ class ParameterTransformations(tuple):
         :returns: *True* if any transformation is derived from rate, *False* otherwise.
         """
         return any(t.from_rate for t in self)
+
+    @property
+    def any_changes_type(self) -> bool:
+        """
+        Checks if any transformation changes the parameter type.
+
+        :returns: *True* if any transformation changes the parameter type, *False* otherwise.
+        """
+        return any(t.changes_type for t in self)
+
+    @property
+    def any_changes_nominal(self) -> bool:
+        """
+        Checks if any transformation changes the nominal histogram.
+
+        :returns: *True* if any transformation changes the nominal histogram, *False* otherwise.
+        """
+        return any(t.changes_nominal for t in self)
