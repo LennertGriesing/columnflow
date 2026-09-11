@@ -2023,27 +2023,28 @@ class InferenceModelMixin(InferenceModelClassMixin):
 
     @classmethod
     def resolve_instances(cls, params: dict[str, Any], shifts: TaskShifts) -> dict[str, Any]:
-        if not cls.resolution_task_cls:
-            raise ValueError(f"resolution_task_cls must be set for multi-config task {cls.task_family}")
-
         cls.get_known_shifts(params, shifts)
 
-        # we loop over all configs/datasets, but return initial params
-        inference_model_cls = InferenceModel.get_cls(params["inference_model"])
-        for i, config_inst in enumerate(params["config_insts"]):
-            datasets = inference_model_cls.used_datasets(config_inst)
+        if cls.resolution_task_cls != law.no_value:
+            if not cls.resolution_task_cls:
+                raise ValueError(f"resolution_task_cls must be set for multi-config task {cls.task_family}")
 
-            for dataset in datasets:
-                # NOTE: we need to copy here, because otherwise taf inits will only be triggered once
-                _params = {
-                    **params,
-                    "config_inst": config_inst,
-                    "config": config_inst.name,
-                    "dataset": dataset,
-                }
-                logger_dev.debug(f"building taf insts for {config_inst.name}, {dataset}")
-                cls.resolution_task_cls.resolve_instances(_params, shifts)
-                cls.resolution_task_cls.get_known_shifts(_params, shifts)
+            # we loop over all configs/datasets, but return initial params
+            inference_model_cls = InferenceModel.get_cls(params["inference_model"])
+            for i, config_inst in enumerate(params["config_insts"]):
+                datasets = inference_model_cls.used_datasets(config_inst)
+
+                for dataset in datasets:
+                    # NOTE: we need to copy here, because otherwise taf inits will only be triggered once
+                    _params = {
+                        **params,
+                        "config_inst": config_inst,
+                        "config": config_inst.name,
+                        "dataset": dataset,
+                    }
+                    logger_dev.debug(f"building taf insts for {config_inst.name}, {dataset}")
+                    cls.resolution_task_cls.resolve_instances(_params, shifts)
+                    cls.resolution_task_cls.get_known_shifts(_params, shifts)
 
         params["known_shifts"] = shifts
 
@@ -2781,7 +2782,12 @@ class ChunkedIOMixin(ConfigTask):
         return filter_configs
 
     def _get_nano_filter_config(self, target: law.FileSystemFileTarget) -> ChunkedIOHandler.FilterConfig | None:
-        if (nano_filter_config := self.config_inst.x("nano_filter_config", None)) is None:
+        if not callable(get_nano_filter_config := self.config_inst.x("get_nano_filter_config", None)):
+            return None
+
+        # evaluate the function to get the filter config
+        nano_filter_config = get_nano_filter_config(self, target)
+        if nano_filter_config is None:
             return None
 
         if not isinstance(nano_filter_config, ChunkedIOHandler.FilterConfig):
