@@ -413,6 +413,22 @@ class MLModel(Derivable):
         """
         return list(requested_producers)
 
+    def training_shifts(
+        self: MLModel,
+        config_inst: od.Config,
+        dataset_inst: od.Dataset,
+    ) -> set[str]:
+        """
+        Returns the names of shifts tagged ``"disjoint_from_nominal"`` (e.g. dedicated samples with
+        varied parameters) whose events of *dataset_inst* in *config_inst* may be prepared for the
+        training in addition to the nominal ones. They have to be required in :py:meth:`requires`.
+
+        :param config_inst: Config instance of the dataset.
+        :param dataset_inst: Dataset instance.
+        :returns: Set of shift names, empty by default.
+        """
+        return set()
+
     def evaluation_producers(
         self: MLModel,
         analysis_inst: od.Analysis,

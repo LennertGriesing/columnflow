@@ -488,6 +488,15 @@ class MLTraining(
         # each fold to train corresponds to one branch
         return list(range(self.ml_model_inst.folds))
 
+    @property
+    def training_folds(self) -> list[int]:
+        # folds used in the training of this branch: all except the one of the branch, which is kept for the
+        # evaluation, or the only fold when the model has a single fold
+        folds = self.ml_model_inst.folds
+        if folds == 1:
+            return [0]
+        return [f for f in range(folds) if f != self.branch]
+
     def workflow_requires(self):
         reqs = super().workflow_requires()
 
@@ -536,8 +545,7 @@ class MLTraining(
                         dataset=dataset_inst.name,
                         fold=f,
                     )
-                    for f in range(self.ml_model_inst.folds)
-                    if f != self.branch
+                    for f in self.training_folds
                 ]
                 for dataset_inst in dataset_insts
             }

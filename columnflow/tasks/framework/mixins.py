@@ -1347,7 +1347,7 @@ class MLModelMixinBase(ConfigTask):
         This method checks if the *dataset_inst* is in the set of datasets of
         the current `ml_model_inst` based on the given *config_inst*. Additionally,
         the function checks that the *shift_inst* does not have the tag
-        `"disjoint_from_nominal"`.
+        `"disjoint_from_nominal"`, unless it is one of the training shifts of the ML model.
 
         :param config_inst: The configuration instance.
         :param dataset_inst: The dataset instance.
@@ -1357,8 +1357,10 @@ class MLModelMixinBase(ConfigTask):
         # evaluate whether the events for the combination of dataset_inst and shift_inst
         # shall be used in the training
         return (
-            dataset_inst in self.ml_model_inst.datasets(config_inst) and
-            not shift_inst.has_tag("disjoint_from_nominal")
+            dataset_inst in self.ml_model_inst.datasets(config_inst) and (
+                not shift_inst.has_tag("disjoint_from_nominal") or
+                shift_inst.name in self.ml_model_inst.training_shifts(config_inst, dataset_inst)
+            )
         )
 
     @classmethod
